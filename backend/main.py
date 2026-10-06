@@ -36,29 +36,26 @@ ADMIN_LOGIN_WINDOW_SECONDS = 15 * 60
 ADMIN_LOGIN_MAX_ATTEMPTS = 5
 ADMIN_LOGIN_ATTEMPTS: dict[str, deque[float]] = {}
 ADMIN_REPORT_STATUSES = {"Approved", "Rejected"}
-HUMAN_IMAGE_LABELS = {
-    "boy",
-    "child",
-    "face",
-    "girl",
-    "human",
-    "man",
-    "people",
-    "person",
-    "portrait",
-    "selfie",
-    "woman",
+
+# Expanded label sets for flexible detection
+ROAD_LABELS = {
+    "road", "street", "tarmac", "asphalt", "highway", "lane", 
+    "pavement", "driveway", "tar", "concrete", "ground", "path"
 }
+
+EXPANDED_HAZARD_KEYWORDS = {
+    "pothole", "hole", "puddle", "water", "crack", "damage", 
+    "earthquake", "pit", "cavity", "sinkhole", "debris", "obstacle"
+}
+
+HUMAN_IMAGE_LABELS = {
+    "boy", "child", "face", "girl", "human", "man", 
+    "people", "person", "portrait", "selfie", "woman"
+}
+
 VEHICLE_IMAGE_LABELS = {
-    "automobile",
-    "bus",
-    "car",
-    "motor vehicle",
-    "motorcycle",
-    "taxi",
-    "truck",
-    "van",
-    "vehicle",
+    "automobile", "bus", "car", "motor vehicle", "motorcycle", 
+    "taxi", "truck", "van", "vehicle"
 }
 
 
@@ -264,8 +261,9 @@ rekognition = boto3.client('rekognition', region_name=AWS_REGION, config=aws_con
 polly = boto3.client('polly', region_name=AWS_REGION, config=aws_config)
 s3 = boto3.client('s3', region_name=AWS_REGION, config=aws_config)
 
-# Healthcheck Route (Fixes 404 & Simulation Fallback)
+# Healthcheck Route
 @app.get("/")
+@app.get("/health")
 def health_check():
     return {
         "status": "online",
@@ -292,7 +290,7 @@ async def analyze_hazard(
         rekog_response = rekognition.detect_labels(
             Image={'Bytes': image_bytes},
             MaxLabels=20,
-            MinConfidence=50.0
+            MinConfidence=40.0
         )
     except (BotoCoreError, ClientError) as exc:
         logger.warning("Rekognition label detection failed: %s", type(exc).__name__)
@@ -326,25 +324,38 @@ async def analyze_hazard(
         custom_min_confidence=REKOGNITION_CUSTOM_LABELS_MIN_CONFIDENCE,
     )
     labels_detected = analysis["all_labels"]
+    normalized_labels = [normalize_label(lbl) for lbl in labels_detected]
 
-    has_road_context = analysis["has_road_context"]
+    # Enhanced road and hazard matching
+    has_road_context = analysis["has_road_context"] or any(
+        lbl in ROAD_LABELS for lbl in normalized_labels
+    )
+    
     detected_hazards = analysis["detected_hazards"]
+    
+    # Soft fallback hazard check
+    fallback_hazards = [
+        lbl for lbl in normalized_labels if lbl in EXPANDED_HAZARD_KEYWORDS
+    ]
+    for fh in fallback_hazards:
+        formatted = fh.capitalize()
+        if formatted not in detected_hazards:
+            detected_hazards.append(formatted)
+
     vehicle_detected = any(
-        normalize_label(label) in VEHICLE_IMAGE_LABELS
-        for label in labels_detected
+        lbl in VEHICLE_IMAGE_LABELS for lbl in normalized_labels
     )
 
+    # Allow images with road/tarmac or hazards, even if humans/vehicles exist
     if not has_road_context and not detected_hazards and not vehicle_detected:
         human_detected = any(
-            normalize_label(label) in HUMAN_IMAGE_LABELS
-            for label in labels_detected
+            lbl in HUMAN_IMAGE_LABELS for lbl in normalized_labels
         )
         return {
             "success": False,
             "error_type": "INVALID_IMAGE",
             "message": (
-                "Invalid Image: Human detected. Please upload road, hazard, or dashcam imagery only. "
-                "People in the background of a road image are allowed."
+                "Invalid Image: Human detected without road surface. Please upload road or hazard imagery only."
                 if human_detected
                 else "Invalid Image: No road surface or hazard detected."
             ),
@@ -364,19 +375,19 @@ async def analyze_hazard(
             "risk_score": None,
             "detected_hazards": [],
             "alert_message": (
-                (
-                    "A vehicle was detected, but the road surface and hazard were not confirmed. "
-                    "Vehicle or person presence does not block analysis; please inspect manually."
-                    if vehicle_detected
-                    else "No supported hazard label was confirmed. General-purpose image "
-                    "labels cannot rule out road damage; please inspect the image manually."
-                )
+                "A vehicle/road was detected, but no critical road hazards were found."
+                if vehicle_detected or has_road_context
+                else "No supported hazard label was confirmed."
             ),
             "audio_url": None,
             "warnings": warnings,
         }
 
-    risk_score = analysis["risk_score"]
+    # Calculate Risk Score
+    risk_score = analysis.get("risk_score") or 0
+    if not risk_score and detected_hazards:
+        risk_score = min(85, 55 + len(detected_hazards) * 15)
+
     severity = "HIGH" if risk_score >= 75 else ("MEDIUM" if risk_score >= 45 else "LOW")
 
     alert_text = (
