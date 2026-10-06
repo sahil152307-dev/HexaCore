@@ -2,6 +2,6 @@ fastapi
 uvicorn
 sqlalchemy
 boto3
-slowapi==0.8.0
+slowapi==0.1.10
 pydantic
 python-multipart
