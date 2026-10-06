@@ -1,5 +1,7 @@
 fastapi
 uvicorn
+sqlalchemy
 boto3
-python-dotenv
+slowapi==0.8.0
+pydantic
 python-multipart
