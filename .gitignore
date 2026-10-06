@@ -1,0 +1,18 @@
+# Local credentials and environment settings
+**/.env
+**/.env.*
+!**/.env.example
+
+# Python
+**/__pycache__/
+**/*.py[cod]
+**/.venv/
+
+# Frontend dependencies and builds
+**/node_modules/
+**/dist/
+**/coverage/
+
+# Local databases
+**/*.db
+**/uploads/
